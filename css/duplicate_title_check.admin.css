@@ -1,0 +1,6 @@
+/* Yellow border on the Title input */
+input.form-text.duplicate-title-warning,
+input[type="text"].duplicate-title-warning {
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 0 1px #f59e0b inset !important;
+}

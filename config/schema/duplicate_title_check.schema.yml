@@ -1,0 +1,10 @@
+duplicate_title_check.settings:
+  type: mapping
+  label: 'Duplicate Title Check settings'
+  mapping:
+    enabled_bundles:
+      type: sequence
+      label: 'Enabled content types'
+      sequence:
+        type: string
+        label: 'Bundle machine name'

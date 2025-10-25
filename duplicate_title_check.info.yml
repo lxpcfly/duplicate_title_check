@@ -1,0 +1,5 @@
+name: Duplicate Title Check
+type: module
+description: Warns users when creating content with a duplicate title.
+core_version_requirement: ^9 || ^10 || ^11
+package: Custom

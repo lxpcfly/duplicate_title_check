@@ -1,0 +1,7 @@
+duplicate_title_check.settings:
+  path: '/admin/config/content/duplicate-title-check'
+  defaults:
+    _form: 'Drupal\duplicate_title_check\Form\DuplicateTitleCheckSettingsForm'
+    _title: 'Duplicate title check'
+  requirements:
+    _permission: 'administer site configuration'

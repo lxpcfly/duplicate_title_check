@@ -1,0 +1,4 @@
+admin:
+  css:
+    theme:
+      css/duplicate_title_check.admin.css: {}

@@ -1,0 +1,15 @@
+{#
+  Renders a Drupal warning message under the Title field.
+  Variables:
+    - message: The warning text.
+#}
+<div role="contentinfo"
+     aria-label="{{ 'Warning message'|t }}"
+     class="messages messages--warning">
+  <div class="messages__header">
+    <h2 class="messages__title">{{ 'Warning'|t }}</h2>
+  </div>
+  <div class="messages__content">
+    <p>{{ message }}</p>
+  </div>
+</div>

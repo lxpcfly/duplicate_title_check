@@ -1,0 +1,6 @@
+duplicate_title_check.settings:
+  title: 'Duplicate title check'
+  description: 'Enable/disable duplicate title warnings per content type.'
+  route_name: duplicate_title_check.settings
+  parent: system.admin_config_content
+  weight: 40
