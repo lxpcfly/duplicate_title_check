@@ -5,23 +5,124 @@ use Drupal\Core\Entity\ContentEntityFormInterface;
 use Drupal\Core\Form\FormStateInterface;
 
 /* ============================================================
- * Utilities
+ * CONFIG HELPERS
  * ============================================================ */
 
 /**
  * Is duplicate-title checking enabled for this bundle?
- *
- * Reads simple config: duplicate_title_check.settings: enabled_bundles (array).
- * - If the array is empty or missing => treat as ALL bundles enabled.
+ * Reads duplicate_title_check.settings: enabled_bundles (array).
+ * - If empty/missing => treat as ALL bundles enabled.
  */
 function duplicate_title_check_is_enabled_for_bundle(string $bundle): bool {
   $config = \Drupal::config('duplicate_title_check.settings');
   $enabled = $config->get('enabled_bundles');
   if (empty($enabled) || !is_array($enabled)) {
-    return TRUE; // default: enabled for all types when none explicitly selected
+    return TRUE; // default: enabled for all types
   }
   return in_array($bundle, $enabled, TRUE);
 }
+
+/* ============================================================
+ * DISCOVERY / RENDER HELPERS
+ * ============================================================ */
+
+/**
+ * Find Title input and its parent wrapper in a robust, theme-agnostic way.
+ *
+ * Returns:
+ *   [
+ *     'found' => bool,
+ *     'input' => &array (ref to the Title input element),
+ *     'parent' => &array (ref to the wrapper where warning+checkbox should go),
+ *     'shape' => 'widget'|'textfield'|'missing'
+ *   ]
+ */
+function _duplicate_title_check_locate_title(array &$form): array {
+  // 1) Field API widget (most common): ['title']['widget'][0]['value']
+  if (isset($form['title']['widget'][0]['value'])) {
+    return [
+      'found'  => TRUE,
+      'input'  => &$form['title']['widget'][0]['value'],
+      'parent' => &$form['title']['widget'][0],
+      'shape'  => 'widget',
+    ];
+  }
+
+  // 2) Plain textfield (some custom forms / overrides): ['title']['#type'] === 'textfield'
+  if (isset($form['title']) && ($form['title']['#type'] ?? NULL) === 'textfield') {
+    return [
+      'found'  => TRUE,
+      'input'  => &$form['title'],
+      'parent' => &$form['title'], // we will inject a sibling container via form reordering fallback below
+      'shape'  => 'textfield',
+    ];
+  }
+
+  // 3) Missing entirely — return a sentinel so we can render at top of form.
+  return [
+    'found'  => FALSE,
+    // Dummy refs (unused); keep structure consistent.
+    'input'  => $form,
+    'parent' => $form,
+    'shape'  => 'missing',
+  ];
+}
+
+/**
+ * Create (if needed) and return a UI container *under Title* or *top of form*.
+ *
+ * When shape = 'widget': inject inside the widget wrapper (after help/preview).
+ * When shape = 'textfield': we inject a sibling container right after Title by
+ *                           a small reordering trick.
+ * When shape = 'missing': we inject a global container at top of the form.
+ *
+ * Returns: &array reference to the UI container element.
+ */
+function &_duplicate_title_check_ensure_ui_container(array &$form, array &$parent, string $shape) {
+  if ($shape === 'missing') {
+    // Global, top-of-form container (put it first).
+    if (!isset($form['duplicate_title_global_ui'])) {
+      $form = ['duplicate_title_global_ui' => [
+        '#type' => 'container',
+        '#access' => FALSE,
+        '#weight' => -1000, // very top
+      ]] + $form;
+    }
+    return $form['duplicate_title_global_ui'];
+  }
+
+  if ($shape === 'textfield') {
+    // Ensure a sibling container just after Title.
+    if (!isset($form['_dtc_tf_reordered'])) {
+      $title = $form['title'];
+      unset($form['title']);
+      $form = [
+        'title' => $title,
+        'duplicate_title_tf_ui' => [
+          '#type' => 'container',
+          '#access' => FALSE,
+          '#weight' => 0.05, // just under Title in most themes
+        ],
+      ] + $form;
+      $form['_dtc_tf_reordered'] = ['#type' => 'value', '#value' => TRUE];
+    }
+    return $form['duplicate_title_tf_ui'];
+  }
+
+  // Default: widget case; we inject directly inside the widget wrapper.
+  if (!isset($parent['duplicate_title_ui'])) {
+    $parent['duplicate_title_ui'] = [
+      '#type'   => 'container',
+      '#access' => FALSE,
+      '#weight' => 100, // ensure after description + preview
+    ];
+  }
+  return $parent['duplicate_title_ui'];
+}
+
+/* ============================================================
+ * QUERY HELPERS
+ * ============================================================ */
 
 /**
  * Do we have a published duplicate of the given title (excluding current nid)?
@@ -34,13 +135,13 @@ function _duplicate_title_check_has_published_dupe(string $title, int $exclude_n
     ->condition('title', $title)
     ->condition('nid', $exclude_nid, '!=')
     ->condition('status', 1)   // published only
-    ->range(0, 1)              // LIMIT 1 for performance
+    ->range(0, 1)              // LIMIT 1
     ->accessCheck(TRUE)        // respect permissions; no info leakage
     ->execute();
 }
 
 /* ============================================================
- * Theme hook (twig for warning)
+ * THEME HOOK
  * ============================================================ */
 
 /**
@@ -50,65 +151,38 @@ function duplicate_title_check_theme() {
   return [
     'duplicate_title_check_warning' => [
       'variables' => ['message' => NULL],
-      'template'  => 'duplicate-title-check-warning',
+      'template'  => 'duplicate-title-check-warning', // uses your twig
     ],
   ];
 }
 
 /* ============================================================
- * Node add/edit form: inject UI under Title + validate
+ * NODE FORM ALTER
  * ============================================================ */
 
 /**
- * Implements hook_form_BASE_FORM_ID_alter() for node forms (add/edit only).
+ * Implements hook_form_BASE_FORM_ID_alter() for node forms (add/edit).
+ * We never run on confirm/delete forms.
  */
 function duplicate_title_check_form_node_form_alter(array &$form, FormStateInterface $form_state, $form_id) {
   $form_object = $form_state->getFormObject();
-
-  // Only add/edit entity forms; skip confirm/delete flows.
   if (!$form_object instanceof ContentEntityFormInterface || $form_object instanceof ContentEntityConfirmFormBase) {
     return;
   }
 
   /** @var \Drupal\node\NodeInterface $node */
   $node = $form_object->getEntity();
-
-  // Respect per-bundle enablement.
   if (!duplicate_title_check_is_enabled_for_bundle($node->bundle())) {
     return;
   }
 
-  // Identify Title shape (textfield vs Field API widget).
-  $title_is_textfield = isset($form['title']['#type']) && $form['title']['#type'] === 'textfield';
-  $title_is_widget    = isset($form['title']['widget'][0]['value']);
+  // Locate Title and pick the correct parent to render under (or fall back to top).
+  $loc = _duplicate_title_check_locate_title($form);
+  $ui  = _duplicate_title_check_ensure_ui_container($form, $loc['parent'], $loc['shape']);
 
-  if (!$title_is_textfield && !$title_is_widget) {
-    // Title not in a standard place; still attach validator.
-    if (!in_array('duplicate_title_check_node_form_validate', $form['#validate'] ?? [], TRUE)) {
-      $form['#validate'][] = 'duplicate_title_check_node_form_validate';
-    }
-    return;
-  }
-
-  // Insert a container inside the Title wrapper (under help + preview).
-  if ($title_is_widget) {
-    $ui_parent  =& $form['title']['widget'][0];
-    $title_input =& $form['title']['widget'][0]['value'];
-  }
-  else {
-    $ui_parent  =& $form['title'];
-    $title_input =& $form['title'];
-  }
-
-  if (!isset($ui_parent['duplicate_title_ui'])) {
-    $ui_parent['duplicate_title_ui'] = [
-      '#type'   => 'container',
-      '#access' => FALSE,   // revealed when a duplicate is detected
-      '#weight' => 100,     // after description + preview
-    ];
-
-    // Acknowledgement checkbox (store at root with #parents).
-    $ui_parent['duplicate_title_ui']['duplicate_title_check'] = [
+  // Always add the checkbox to our container (value saved at root via #parents).
+  if (!isset($ui['duplicate_title_check'])) {
+    $ui['duplicate_title_check'] = [
       '#type' => 'checkbox',
       '#title' => t('A piece of content with this title already exists. Keep the same title anyway?'),
       '#description' => t('Selecting this will save your content with a duplicate title. Consider revising the title for clarity and SEO.'),
@@ -118,29 +192,31 @@ function duplicate_title_check_form_node_form_alter(array &$form, FormStateInter
     ];
   }
 
-  // Decide whether to show warning + checkbox on this build.
+  // Show UI on this build?
   $show_ui = (bool) $form_state->get('show_duplicate_checkbox');
   $user_input = $form_state->getUserInput();
   if (isset($user_input['duplicate_title_check']) && (string) $user_input['duplicate_title_check'] === '1') {
-    // Keep visible when user has just checked it so value isn't dropped.
-    $show_ui = TRUE;
+    $show_ui = TRUE; // keep visible if user just checked it so value isn't dropped
   }
 
   if ($show_ui) {
-    // Themed warning (Drupal messages styling with icon + "Warning").
-    $ui_parent['duplicate_title_ui']['warning'] = [
+    // Themed Drupal warning (icon + “Warning”); will appear under Title
+    // or at top of the form for the 'missing' shape.
+    $ui['warning'] = [
       '#theme' => 'duplicate_title_check_warning',
       '#message' => t('A published item with this title already exists. You can keep the same title, or change it for clarity.'),
       '#weight' => -10,
     ];
-    $ui_parent['duplicate_title_ui']['#access'] = TRUE;
+    $ui['#access'] = TRUE;
 
-    // Optional: yellow border on Title.
-    $form['#attached']['library'][] = 'duplicate_title_check/admin';
-    $title_input['#attributes']['class'][] = 'duplicate-title-warning';
+    // Optional yellow border on Title input (only when we actually found it).
+    if ($loc['found']) {
+      $form['#attached']['library'][] = 'duplicate_title_check/admin';
+      $loc['input']['#attributes']['class'][] = 'duplicate-title-warning';
+    }
   }
   else {
-    $ui_parent['duplicate_title_ui']['#access'] = FALSE;
+    $ui['#access'] = FALSE;
   }
 
   // Ensure our validator runs once.
@@ -149,8 +225,12 @@ function duplicate_title_check_form_node_form_alter(array &$form, FormStateInter
   }
 }
 
+/* ============================================================
+ * VALIDATOR
+ * ============================================================ */
+
 /**
- * Node form validator (single DB query; warning-only UX).
+ * Node form validator (single DB query; warning-only UX with ack path).
  *
  * Flow:
  *  - Duplicate AND checkbox NOT ticked → set flag + setRebuild(TRUE) to show UI.
@@ -165,13 +245,12 @@ function duplicate_title_check_node_form_validate(array &$form, FormStateInterfa
 
   /** @var \Drupal\node\NodeInterface $node */
   $node = $form_object->getEntity();
-
   if (!duplicate_title_check_is_enabled_for_bundle($node->bundle())) {
     $form_state->set('show_duplicate_checkbox', FALSE);
     return;
   }
 
-  // Read Title safely across shapes.
+  // Read Title robustly from form_state first (covers widget/textfield/missing).
   $title_input = $form_state->getValue('title');
   if (is_array($title_input) && isset($title_input[0]['value'])) {
     $title = trim((string) $title_input[0]['value']);
@@ -180,9 +259,11 @@ function duplicate_title_check_node_form_validate(array &$form, FormStateInterfa
     $title = trim($title_input);
   }
   else {
+    // Fallback: use the entity label (may be blank on "Add" forms before save).
     $title = trim((string) $node->label());
   }
 
+  // If absolutely no title is available, still clear UI and continue.
   if ($title === '') {
     $form_state->set('show_duplicate_checkbox', FALSE);
     return;
@@ -193,11 +274,11 @@ function duplicate_title_check_node_form_validate(array &$form, FormStateInterfa
 
   if ($duplicate_exists) {
     if ($ack) {
-      // Acknowledged → proceed; do not rebuild (so the save continues).
+      // Acknowledged → proceed; DO NOT rebuild (so the save continues).
       $form_state->set('show_duplicate_checkbox', FALSE);
       return;
     }
-    // Not acknowledged → show UI and rebuild this round.
+    // Not acknowledged → show UI this round; rebuild to render warning + checkbox.
     $form_state->set('show_duplicate_checkbox', TRUE);
     $form_state->setRebuild(TRUE);
   }
